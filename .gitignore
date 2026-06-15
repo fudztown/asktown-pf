@@ -1,0 +1,25 @@
+# Secrets
+.env
+*.env
+tokens.enc
+config/local.php
+config/secrets.*
+
+# Logs
+*.log
+logs/
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Dependencies
+vendor/
+__pycache__/
+*.pyc
+
+# Temp
+tmp/
+temp/
