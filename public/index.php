@@ -238,12 +238,15 @@ $supabaseKey = get_supabase_anon_key();
                 return;
             }
 
-            if (!data.accounts || data.accounts.length === 0) {
+            // Support both old (data.accounts) and new (data.data) response formats
+            const accounts = data.accounts || data.data || [];
+
+            if (accounts.length === 0) {
                 container.innerHTML = '<p style="color:#64748b;">You currently have no bank accounts connected.</p>';
                 return;
             }
 
-            container.innerHTML = data.accounts.map(acc => {
+            container.innerHTML = accounts.map(acc => {
                 let expiryHtml = '';
                 if (acc.expiry && acc.expiry.refresh_expiry) {
                     const date = new Date(acc.expiry.refresh_expiry);
