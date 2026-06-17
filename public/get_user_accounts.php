@@ -94,10 +94,10 @@ function refreshAccessToken(string $userId, array $encrypted, string $key): stri
 function callTrueLayer(string $endpoint, string $accessToken): array {
     $ch = curl_init($endpoint);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            "Authorization: Bearer ***        "Content-Type: application/json",
-            "Accept: application/json",
-        ]);
+        "Authorization: Bearer $accessToken",
+        "Content-Type: application/json",
+        "Accept: application/json",
+    ]);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 20);
 
@@ -158,8 +158,8 @@ $debug['encryption_key_length'] = strlen($encryptionKey);
 $tokenDir  = "/opt/finance/users/$userId";
 $tokenFile = "$tokenDir/tokens.enc";
 
-$debug['token_directory']  = $tokenDir;
-$debug['token_file_path']  = $tokenFile;
+$debug['token_directory']     = $tokenDir;
+$debug['token_file_path']     = $tokenFile;
 $debug['token_file_exists']   = file_exists($tokenFile);
 $debug['token_file_readable'] = is_readable($tokenFile);
 
@@ -208,17 +208,17 @@ $debug['token_created_at']    = $encrypted['created_at'] ?? 'unknown';
 $provider = $encrypted['provider'] ?? 'truelayer';
 $endpoint = getEndpoint($provider);
 
-$debug['provider']  = $provider;
-$debug['endpoint']  = $endpoint;
+$debug['provider'] = $provider;
+$debug['endpoint'] = $endpoint;
 
 // ── Call TrueLayer ────────────────────────────────────────────────────────────
 
 $result   = callTrueLayer($endpoint, $accessToken);
 $httpCode = $result['httpCode'];
 
-$debug['truelayer_http_code']      = $httpCode;
-$debug['curl_errno']               = $result['errno'];
-$debug['curl_error']               = $result['error'] ?: null;
+$debug['truelayer_http_code']       = $httpCode;
+$debug['curl_errno']                = $result['errno'];
+$debug['curl_error']                = $result['error'] ?: null;
 $debug['truelayer_response_length'] = strlen($result['response'] ?? '');
 
 // ── Handle 401 — refresh and retry ───────────────────────────────────────────
@@ -244,8 +244,8 @@ if ($httpCode === 401) {
 
 $data = json_decode($result['response'], true);
 
-$debug['truelayer_json_parsed']   = is_array($data);
-$debug['truelayer_raw_response']  = $result['response'];
+$debug['truelayer_json_parsed']    = is_array($data);
+$debug['truelayer_raw_response']   = $result['response'];
 $debug['truelayer_top_level_keys'] = is_array($data) ? array_keys($data) : [];
 
 if ($httpCode !== 200) {
