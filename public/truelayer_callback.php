@@ -101,26 +101,50 @@ try {
         exit;
     }
 
+    // === DETAILED DEBUG LOGGING FOR TOKEN SAVE ===
+    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userId extracted = " . ($userId ?? 'NULL') . "\n", FILE_APPEND);
+    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: encryptionKey present = " . (!empty($encryptionKey) ? 'yes' : 'NO') . "\n", FILE_APPEND);
+
     // Encrypt and store
-    $key   = sodium_crypto_generichash($encryptionKey, '', 32);
-    $nonce = random_bytes(24);
+    try {
+        $key   = sodium_crypto_generichash($encryptionKey, '', 32);
+        $nonce = random_bytes(24);
 
-    $encrypted = [
-        'access_token'  => base64_encode(sodium_crypto_secretbox($tokens['access_token'], $nonce, $key)),
-        'refresh_token' => base64_encode(sodium_crypto_secretbox($tokens['refresh_token'] ?? '', $nonce, $key)),
-        'nonce'         => base64_encode($nonce),
-        'created_at'    => date('c'),
-        'provider'      => 'truelayer',
-    ];
+        $encrypted = [
+            'access_token'  => base64_encode(sodium_crypto_secretbox($tokens['access_token'], $nonce, $key)),
+            'refresh_token' => base64_encode(sodium_crypto_secretbox($tokens['refresh_token'] ?? '', $nonce, $key)),
+            'nonce'         => base64_encode($nonce),
+            'created_at'    => date('c'),
+            'provider'      => 'truelayer',
+        ];
 
-    $userDir = "/opt/finance/users/$userId";
-    if (!is_dir($userDir)) {
-        @mkdir($userDir, 0700, true);
+        $userDir = "/opt/finance/users/$userId";
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userDir = $userDir\n", FILE_APPEND);
+
+        if (!is_dir($userDir)) {
+            $mkdirResult = @mkdir($userDir, 0700, true);
+            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: mkdir result = " . ($mkdirResult ? 'success' : 'failed') . "\n", FILE_APPEND);
+        } else {
+            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userDir already existed\n", FILE_APPEND);
+        }
+
+        $tokenFile = "$userDir/tokens.enc";
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: tokenFile path = $tokenFile\n", FILE_APPEND);
+
+        $writeResult = @file_put_contents($tokenFile, json_encode($encrypted));
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: file_put_contents bytes written = " . ($writeResult !== false ? $writeResult : 'FAILED') . "\n", FILE_APPEND);
+
+        if ($writeResult !== false) {
+            @chmod($tokenFile, 0600);
+            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: chmod applied\n", FILE_APPEND);
+        }
+
+    } catch (Throwable $e) {
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG EXCEPTION during save: " . $e->getMessage() . "\n", FILE_APPEND);
+        header('Location: /index.php?truelayer_error=token_save_failed');
+        exit;
     }
-
-    $tokenFile = "$userDir/tokens.enc";
-    @file_put_contents($tokenFile, json_encode($encrypted));
-    @chmod($tokenFile, 0600);
+    // === END DEBUG LOGGING ===
 
     header('Location: /index.php?bank_connected=1');
     exit;
