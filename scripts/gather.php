@@ -119,12 +119,31 @@ foreach ($userIds as $userId) {
     foreach ($allAccounts as $acc) {
         $accIdRaw = $acc['account_id'] ?? $acc['card_id'] ?? null;
         if (!$accIdRaw) continue;
-        
-        $accIdHash = hash('sha256', $accIdRaw); 
-        
+
+        $accIdHash = hash('sha256', $accIdRaw);
         $displayName = $acc['display_name'] ?? ($acc['label'] ?? ($acc['card_network'] ?? 'Bank Account'));
+
+        // -- FETCH BALANCE (NEW) --
+        $balance = "0.00";
+        $balUrl = ($acc['_type'] === 'cards')
+            ? "https://api.truelayer.com/data/v1/cards/$accIdRaw/balance"
+            : "https://api.truelayer.com/data/v1/accounts/$accIdRaw/balance";
+
+        $ch = curl_init($balUrl);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer $accessToken"]);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $balData = json_decode(curl_exec($ch) ?: '{}', true);
+        curl_close($ch);
+
+        if (!empty($balData['results'][0])) {
+            $res = $balData['results'][0];
+            // For cards, 'current' is the outstanding balance (the debt)
+            $balance = (string)($res['current'] ?? $res['available'] ?? '0.00');
+            echo "  [i] Balance for $displayName: $balance\n";
+        }
+
         $encName = $vault->encrypt($displayName);
-        $encBal  = $vault->encrypt("0.00"); 
+        $encBal  = $vault->encrypt($balance);
 
         $stmt = $pdo->prepare("
             INSERT INTO bank_accounts (user_id, provider_id, account_id_hashed, encrypted_account_name, encrypted_balance, currency)

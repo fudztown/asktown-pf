@@ -134,7 +134,9 @@ $userId = $_GET['user_id'] ?? $_POST['user_id'] ?? '';
 if (!preg_match('/^[a-zA-Z0-9_\-]+$/', $userId)) {
     respond(['error' => 'invalid_user_id'], 400);
 }
+require_once __DIR__ . '/../lib/Vault.php';
 
+$debug = [];
 $debugMode = isset($_GET['debug']) && $_GET['debug'] === '1';
 $debug     = ['user_id_received' => $userId];
 
@@ -157,6 +159,20 @@ $key = sodium_crypto_generichash($encryptionKey, '', SODIUM_CRYPTO_SECRETBOX_KEY
 
 $debug['encryption_key_loaded'] = true;
 $debug['encryption_key_length'] = strlen($encryptionKey);
+
+// ── Database Connection ───────────────────────────────────────────────────────
+
+$dbPass = $_ENV['DB_PASSWORD'] ?? getenv('DB_PASSWORD');
+$dsn = "pgsql:host=db.mabhliiixpfbsahabzgu.supabase.co;port=5432;dbname=postgres";
+$pdo = null;
+
+try {
+    if ($dbPass) {
+        $pdo = new PDO($dsn, "postgres", $dbPass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    }
+} catch (PDOException $e) {
+    $debug['db_connection_error'] = $e->getMessage();
+}
 
 // ── Load token file ───────────────────────────────────────────────────────────
 
@@ -280,11 +296,62 @@ if ($debugMode) {
     $createdAt = isset($encrypted['created_at']) ? strtotime($encrypted['created_at']) : time();
     $expiresAt = $createdAt + (90 * 24 * 60 * 60);
     $daysLeft  = (int)ceil(($expiresAt - time()) / (24 * 60 * 60));
-        
-    $debug['consent_expires_at'] = date('c', $expiresAt);
-    $debug['days_remaining']    = $daysLeft;
-        
-    $payload['debug'] = $debug;
+    $vault = new \Asktown\Security\Vault(\Asktown\Security\Vault::deriveKey($encryptionKey));
+    if ($pdo) {
+        try {
+            // 1. Fetch Vaulted Accounts
+            $stmtAcc = $pdo->prepare("SELECT id, provider_id, account_id_hashed, encrypted_account_name, encrypted_balance, currency FROM bank_accounts WHERE user_id = ?");
+            $stmtAcc->execute([$userId]);
+            $vaultAccs = $stmtAcc->fetchAll(PDO::FETCH_ASSOC);
+            
+            $decryptedAccs = [];
+            foreach ($vaultAccs as $vAcc) {
+                try {
+                    $decryptedAccs[] = [
+                        'account_id' => $vAcc['id'], // Use Internal UUID
+                        'display_name' => $vault->decrypt($vAcc['encrypted_account_name']),
+                        'balance' => ['current' => (float)$vault->decrypt($vAcc['encrypted_balance'])],
+                        'currency' => $vAcc['currency'],
+                        'provider' => ['provider_id' => $vAcc['provider_id']]
+                    ];
+                } catch (Exception $e) { continue; }
+            }
+            
+            // Merge or replace live accounts with vaulted ones to ensure UI is populated
+            if (empty($payload['data']) && !empty($decryptedAccs)) {
+                $payload['data'] = $decryptedAccs;
+            }
+
+            // 2. Fetch Vaulted Transactions
+            $stmt = $pdo->prepare("SELECT account_id, date, encrypted_description, encrypted_amount, is_pending FROM transactions WHERE user_id = ? ORDER BY date DESC, created_at DESC LIMIT 100");
+            $stmt->execute([$userId]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $decryptedTx = [];
+            foreach ($rows as $row) {
+                try {
+                    $decryptedTx[] = [
+                        'account_id' => $row['account_id'],
+                        'date' => $row['date'],
+                        'description' => $vault->decrypt($row['encrypted_description']),
+                        'amount' => $vault->decrypt($row['encrypted_amount']),
+                        'is_pending' => (bool)$row['is_pending']
+                    ];
+                } catch (Exception $e) {
+                    continue;
+                }
+            }
+            $payload['vault_transactions'] = $decryptedTx;
+        } catch (Exception $e) {
+            $debug['vault_fetch_error'] = $e->getMessage();
+        }
+    }
+
+    if ($debugMode) {
+        $payload['debug'] = $debug;
+    }
+
+    respond($payload);
 }
 
 respond($payload);
