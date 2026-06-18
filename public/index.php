@@ -206,7 +206,7 @@ $supabaseKey = get_supabase_anon_key();
         }
         const clientId = 'mypersonaldatagatherer-9a0289';
         const redirectUri = encodeURIComponent('https://asktown.co.uk/callback');
-        const scope = encodeURIComponent('accounts balance transactions cards');
+        const scope = encodeURIComponent('accounts balance transactions cards offline_access');
         const state = encodeURIComponent(data.signed_state);
         const url = `https://auth.truelayer.com/?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&providers=uk-ob-all&state=${state}`;
         window.location.href = url;
@@ -214,17 +214,8 @@ $supabaseKey = get_supabase_anon_key();
 
     async function loadAccounts(userId) {
         try {
-            const response = await fetch(`get_user_accounts.php?user_id=${userId}&debug=1`);
+            const response = await fetch(`get_user_accounts.php?user_id=${userId}&debug=1&t=${Date.now()}`);
             const data = await response.json();
-
-            console.group("TrueLayer Debug Info");
-            console.log("Full JSON Response:", data);
-            console.log("PHP Debug Logs:", data.debug);
-
-            if (data.error) {
-                console.error("Backend Error:", data.error);
-                console.error("Error Detail:", data.message || "No message");
-            }
 
             if (data.accounts) {
                 console.log("Accounts Found:", data.accounts.length);
@@ -243,23 +234,48 @@ $supabaseKey = get_supabase_anon_key();
 
             if (accounts.length === 0) {
                 container.innerHTML = '<p style="color:#64748b;">You currently have no bank accounts connected.</p>';
-                return;
+            } else {
+                const daysLeft = (data.debug && data.debug.days_remaining !== undefined) ? data.debug.days_remaining : 90;
+                const isCritical = daysLeft < 7;
+                const statusColor = isCritical ? '#991b1b' : '#166534';
+                const statusBg = isCritical ? '#fee2e2' : '#dcfce7';
+
+                let html = accounts.map(acc => {
+                    return `
+                        <div class="account-card" style="border-left: 4px solid ${statusColor};">
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 12px;">
+                                <div>
+                                    <strong style="font-size:1.1rem;">${acc.display_name || acc.account_id}</strong><br>
+                                    <small style="color:#64748b; text-transform: uppercase; font-weight: bold;">${acc.provider?.provider_id ?? 'unknown'}</small>
+                                </div>
+                                <div style="text-align:right;">
+                                    <span style="display:inline-block; padding: 4px 8px; border-radius: 4px; background:${statusBg}; color:${statusColor}; font-size:0.8rem; font-weight:bold;">
+                                        ACTIVE • ${daysLeft} DAYS LEFT
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div style="display:flex; justify-content:space-between; align-items:flex-end; border-top: 1px solid #e2e8f0; padding-top: 12px;">
+                                <div style="font-size:0.85rem; color:#64748b;">
+                                    🔄 Automatic background refresh active
+                                </div>
+                                <button onclick="alert('Disconnect functionality coming soon')" class="btn" style="background:#fee2e2; color:#991b1b; padding:6px 12px; font-size:0.8rem; border:1px solid #fecaca; cursor:pointer; min-width:100px;">
+                                    Disconnect
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                container.innerHTML = html;
             }
 
-            container.innerHTML = accounts.map(acc => {
-                let expiryHtml = '';
-                if (acc.expiry && acc.expiry.refresh_expiry) {
-                    const date = new Date(acc.expiry.refresh_expiry);
-                    expiryHtml = `<small style="color:#64748b;">Refresh expires: ${date.toLocaleDateString()}</small>`;
+            // Remove the separate statusDiv logic from below since it's now integrated
+            if (data.debug && data.debug.attempting_token_refresh) {
+                console.log("%c🔄 Token Refresh Attempted", "color: #3b82f6; font-weight: bold;");
+                if (data.debug.token_refresh_success) {
+                    console.log("%c✅ Token Refresh Successful", "color: #10b981; font-weight: bold; font-size: 1.1em;");
                 }
-                return `
-                    <div class="account-card">
-                        <strong>${acc.display_name || acc.account_id}</strong><br>
-                        <small style="color:#64748b;">${acc.provider?.provider_id ?? 'unknown'}</small><br>
-                        ${expiryHtml}
-                    </div>
-                `;
-            }).join('');
+            }
 
         } catch (err) {
             console.error('Fetch or parse error:', err);

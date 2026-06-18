@@ -34,7 +34,7 @@ function decryptField(string $b64Ciphertext, string $b64Nonce, string $key): str
     return sodium_crypto_secretbox_open($ciphertext, $nonce, $key);
 }
 
-function refreshAccessToken(string $userId, array $encrypted, string $key): string|false {
+function refreshAccessToken(string $userId, array $encrypted, string $key, array &$debug): string|false {
     $refreshToken = decryptField($encrypted['refresh_token'], $encrypted['nonce'], $key);
     if ($refreshToken === false) return false;
 
@@ -59,22 +59,27 @@ function refreshAccessToken(string $userId, array $encrypted, string $key): stri
     $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    if ($httpCode !== 200) return false;
+    if ($httpCode !== 200) {
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | REFRESH_FAILURE: userId=$userId | http=$httpCode | response=$response\n", FILE_APPEND);
+        return false;
+    }
 
     $tokens = json_decode($response, true);
     if (empty($tokens['access_token'])) return false;
 
-    // Re-encrypt with a fresh nonce
     $newNonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    $newAccessToken  = base64_encode(sodium_crypto_secretbox($tokens['access_token'], $newNonce, $key));
 
-    $newAccessToken  = base64_encode(
-        sodium_crypto_secretbox($tokens['access_token'], $newNonce, $key)
-    );
-    // TrueLayer may not return a new refresh token — fall back to the old one
-    $newRefreshRaw   = $tokens['refresh_token'] ?? $refreshToken;
-    $newRefreshToken = base64_encode(
-        sodium_crypto_secretbox($newRefreshRaw, $newNonce, $key)
-    );
+    $newRefreshRaw = $tokens['refresh_token'] ?? $refreshToken;
+    
+    // ATTACH TO GLOBAL DEBUG ARRAY (BY REF)
+    $debug['new_refresh_token_preview'] = substr($newRefreshRaw, 0, 10) . '...';
+    $debug['token_refresh_success'] = true;
+
+    $newRefreshToken = base64_encode(sodium_crypto_secretbox($newRefreshRaw, $newNonce, $key));
+
+    // FIX: Consistent logging for debugging refreshes
+    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | REFRESH: userId=$userId | status=success | new_refresh=" . (isset($tokens['refresh_token']) ? 'yes' : 'no') . "\n", FILE_APPEND);
 
     $tokenFile = "/opt/finance/users/$userId/tokens.enc";
     $newData   = [
@@ -211,7 +216,7 @@ $endpoint = getEndpoint($provider);
 $debug['provider'] = $provider;
 $debug['endpoint'] = $endpoint;
 
-// ── Call TrueLayer ────────────────────────────────────────────────────────────
+// -- Call TrueLayer ------------------------------------------------------------
 
 $result   = callTrueLayer($endpoint, $accessToken);
 $httpCode = $result['httpCode'];
@@ -221,12 +226,17 @@ $debug['curl_errno']                = $result['errno'];
 $debug['curl_error']                = $result['error'] ?: null;
 $debug['truelayer_response_length'] = strlen($result['response'] ?? '');
 
-// ── Handle 401 — refresh and retry ───────────────────────────────────────────
+// -- FORCE REFRESH FOR TESTING --
+// User wants to refresh on every page load for now.
+$forceRefresh = false; 
 
-if ($httpCode === 401) {
+if ($httpCode === 401 || $forceRefresh) {
+    if ($forceRefresh) {
+        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: Forcing refresh for testing\n", FILE_APPEND);
+    }
     $debug['attempting_token_refresh'] = true;
 
-    $newAccessToken = refreshAccessToken($userId, $encrypted, $key);
+    $newAccessToken = refreshAccessToken($userId, $encrypted, $key, $debug);
 
     if ($newAccessToken === false) {
         respond(['error' => 'token_refresh_failed', 'debug' => $debug], 401);
@@ -267,6 +277,13 @@ $payload = [
 ];
 
 if ($debugMode) {
+    $createdAt = isset($encrypted['created_at']) ? strtotime($encrypted['created_at']) : time();
+    $expiresAt = $createdAt + (90 * 24 * 60 * 60);
+    $daysLeft  = (int)ceil(($expiresAt - time()) / (24 * 60 * 60));
+        
+    $debug['consent_expires_at'] = date('c', $expiresAt);
+    $debug['days_remaining']    = $daysLeft;
+        
     $payload['debug'] = $debug;
 }
 
