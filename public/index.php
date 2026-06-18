@@ -90,6 +90,7 @@ $supabaseKey = get_supabase_anon_key();
                     <div class="section card">
                         <h2>Connected Accounts</h2>
                         <div id="accounts-container"><p style="color:#64748b;">Loading accounts...</p></div>
+                        <div id="vault-controls-container" style="margin-top: 20px;"></div>
                         <a href="#" onclick="startBankConnection('${userId}')" class="btn btn-primary" style="margin-top:16px;">Connect a Bank</a>
                     </div>
 
@@ -231,6 +232,98 @@ $supabaseKey = get_supabase_anon_key();
 
             // Support both old (data.accounts) and new (data.data) response formats
             const accounts = data.accounts || data.data || [];
+
+            // -- Vault Trigger UI --
+            const vaultControls = document.getElementById('vault-controls-container');
+            if (vaultControls) {
+                vaultControls.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                        <button id="pulse-btn" style="padding: 8px 16px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight:600;">
+                            🔄 Trigger Vault Pulse
+                        </button>
+                        <span id="pulse-status" style="color: #94a3b8; font-size: 0.85rem;">Vault Ready</span>
+                    </div>
+                    <pre id="pulse-console" style="background: #0f172a; color: #4ade80; padding: 15px; border-radius: 8px; font-size: 0.75rem; max-height: 200px; overflow-y: auto; display: none; border: 1px solid #1e293b;"></pre>
+                    
+                    <div id="vault-data-viewer" style="margin-top: 20px; display: none;">
+                        <h4 style="font-size: 0.9rem; color: #1e293b; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+                            🔐 Data in Vault (Encrypted at Rest)
+                            <span style="font-size: 0.7rem; background: #d1fae5; color: #065f46; padding: 2px 6px; border-radius: 4px;">LIVE FROM SUPABASE</span>
+                        </h4>
+                        <div id="vault-transactions" style="background: white; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+                            <table style="width: 100%; border-collapse: collapse; font-size: 0.8rem;">
+                                <thead style="background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                                    <tr>
+                                        <th style="padding: 10px; text-align: left; color: #64748b;">Date</th>
+                                        <th style="padding: 10px; text-align: left; color: #64748b;">Encrypted Description</th>
+                                        <th style="padding: 10px; text-align: right; color: #64748b;">Encrypted Amount</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="vault-table-body">
+                                    <tr><td colspan="3" style="padding: 20px; text-align: center; color: #94a3b8;">No data in vault yet. Run a pulse to sync.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+                
+                const loadVaultData = async () => {
+                    const viewer = document.getElementById('vault-data-viewer');
+                    const tbody = document.getElementById('vault-table-body');
+                    try {
+                        const res = await fetch(`scripts/get_vault_data.php?user_id=${userId}`);
+                        if (!res.ok) throw new Error("Fetch failed");
+                        const data = await res.json();
+                        if (data.transactions && data.transactions.length > 0) {
+                            viewer.style.display = "block";
+                            tbody.innerHTML = data.transactions.map(tx => `
+                                <tr style="border-bottom: 1px solid #f1f5f9;">
+                                    <td style="padding: 10px; font-weight: 500;">${tx.date}</td>
+                                    <td style="padding: 10px; font-family: monospace; color: #64748b; font-size: 0.7rem; word-break: break-all;">${tx.encrypted_description}</td>
+                                    <td style="padding: 10px; text-align: right; font-family: monospace; color: #64748b; font-size: 0.7rem; word-break: break-all;">${tx.encrypted_amount}</td>
+                                </tr>
+                            `).join('');
+                        }
+                    } catch (e) { console.error("Vault fetch error:", e); }
+                };
+
+                loadVaultData();
+
+                document.getElementById('pulse-btn').onclick = async function() {
+                    const btn = this;
+                    const status = document.getElementById('pulse-status');
+                    const consoleArea = document.getElementById('pulse-console');
+                    
+                    btn.disabled = true;
+                    btn.style.opacity = '0.5';
+                    status.innerText = "Gathering data...";
+                    consoleArea.style.display = "block";
+                    consoleArea.innerText = "> Initializing sync...\\n";
+
+                    try {
+                        const response = await fetch(`scripts/gather_trigger.php?user_id=${userId}`);
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            consoleArea.innerText += decoder.decode(value);
+                            consoleArea.scrollTop = consoleArea.scrollHeight;
+                        }
+                        status.innerText = "Sync complete.";
+                        loadVaultData();
+                    } catch (err) {
+                        consoleArea.innerText += "\\n[ERROR] " + err.message;
+                        status.innerText = "Sync failed.";
+                    } finally {
+                        btn.disabled = false;
+                        btn.style.opacity = '1';
+                    }
+                };
+            }
+            // -- END Vault Trigger UI --
+            // -- END Vault Trigger UI --
 
             if (accounts.length === 0) {
                 container.innerHTML = '<p style="color:#64748b;">You currently have no bank accounts connected.</p>';

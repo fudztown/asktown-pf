@@ -80,24 +80,50 @@ foreach ($userIds as $userId) {
 
     $accessToken = $authResp['access_token'];
 
-    // B. Call TrueLayer for Accounts
-    $ch = curl_init('https://api.truelayer.com/data/v1/accounts');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer $accessToken"]);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    $accountsData = json_decode(curl_exec($ch), true);
-    curl_close($ch);
+    echo "  [i] Successfully refreshed token. Fetching accounts...\n";
 
-    if (empty($accountsData['results'])) {
-        echo "  [i] No accounts found for $userId.\n";
+    // B. Call TrueLayer for Accounts (trying /v1/accounts AND /v1/cards)
+    $endpoints = [
+        'accounts' => 'https://api.truelayer.com/data/v1/accounts',
+        'cards'    => 'https://api.truelayer.com/data/v1/cards'
+    ];
+
+    $allAccounts = [];
+
+    foreach ($endpoints as $type => $url) {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer $accessToken"]);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $respRaw = curl_exec($ch) ?: '{}';
+        $data = json_decode($respRaw, true);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode === 200 && !empty($data['results'])) {
+            echo "  [+] Found " . count($data['results']) . " $type.\n";
+            foreach ($data['results'] as $item) {
+                // Normalize account_id for cards vs accounts
+                $item['_type'] = $type;
+                $allAccounts[] = $item;
+            }
+        } else {
+            echo "  [i] $type endpoint returned HTTP $httpCode/status: " . ($data['error'] ?? 'No results') . "\n";
+        }
+    }
+
+    if (empty($allAccounts)) {
+        echo "  [!] No accounts or cards found for $userId across all endpoints.\n";
         continue;
     }
 
-    foreach ($accountsData['results'] as $acc) {
-        $accIdRaw = $acc['account_id'];
-        $accIdHash = hash('sha256', $accIdRaw); // Blind index for dedupe
+    foreach ($allAccounts as $acc) {
+        $accIdRaw = $acc['account_id'] ?? $acc['card_id'] ?? null;
+        if (!$accIdRaw) continue;
         
-        $encName = $vault->encrypt($acc['display_name'] ?? 'Bank Account');
-        // Note: Balance is often in a separate endpoint; using dummy for structure
+        $accIdHash = hash('sha256', $accIdRaw); 
+        
+        $displayName = $acc['display_name'] ?? ($acc['label'] ?? ($acc['card_network'] ?? 'Bank Account'));
+        $encName = $vault->encrypt($displayName);
         $encBal  = $vault->encrypt("0.00"); 
 
         $stmt = $pdo->prepare("
@@ -109,16 +135,20 @@ foreach ($userIds as $userId) {
                 last_updated = NOW()
             RETURNING id
         ");
-        $stmt->execute([$userId, $acc['provider']['provider_id'], $accIdHash, $encName, $encBal, $acc['currency']]);
+        $stmt->execute([$userId, $acc['provider']['provider_id'] ?? 'unknown', $accIdHash, $encName, $encBal, $acc['currency']]);
         $dbAccId = $stmt->fetchColumn();
 
-        echo "  [+] Account Synced: " . ($acc['display_name'] ?? $accIdRaw) . "\n";
+        echo "  [+] Synced (" . $acc['_type'] . "): " . $displayName . "\n";
         
-        // C. Fetch & Vault Transactions (Simple 30-day example)
-        $ch = curl_init("https://api.truelayer.com/data/v1/accounts/$accIdRaw/transactions");
+        // C. Fetch Transactions (Handle cards/accounts path)
+        $txUrl = ($acc['_type'] === 'cards') 
+            ? "https://api.truelayer.com/data/v1/cards/$accIdRaw/transactions"
+            : "https://api.truelayer.com/data/v1/accounts/$accIdRaw/transactions";
+            
+        $ch = curl_init($txUrl);
         curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer $accessToken"]);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        $txData = json_decode(curl_exec($ch), true);
+        $txData = json_decode(curl_exec($ch) ?: '{}', true);
         curl_close($ch);
 
         if (!empty($txData['results'])) {
@@ -128,16 +158,20 @@ foreach ($userIds as $userId) {
                 ON CONFLICT (truelayer_id) DO NOTHING
             ");
             foreach ($txData['results'] as $tx) {
-                $encAmt  = $vault->encrypt((string)$tx['amount']);
-                $encDesc = $vault->encrypt($tx['description'] ?? '');
+                $encAmt  = $vault->encrypt((string)($tx['amount'] ?? '0'));
+                $encDesc = $vault->encrypt($tx['description'] ?? $tx['merchant_name'] ?? 'No description');
+                
+                // Fix: Ensure a real boolean is passed to PostgreSQL for $7 (is_pending)
+                $isPending = (isset($tx['transaction_status']) && $tx['transaction_status'] === 'PENDING') ? 1 : 0;
+                
                 $txStmt->execute([
                     $dbAccId, 
                     $userId, 
                     $tx['transaction_id'], 
-                    substr($tx['timestamp'], 0, 10), 
+                    substr($tx['timestamp'] ?? date('Y-m-d'), 0, 10), 
                     $encAmt, 
                     $encDesc, 
-                    $tx['transaction_status'] === 'PENDING'
+                    $isPending
                 ]);
             }
             echo "    [>] Synced " . count($txData['results']) . " transactions.\n";
