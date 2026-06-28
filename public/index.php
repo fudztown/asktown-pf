@@ -11,6 +11,7 @@ $supabaseKey = get_supabase_anon_key();
     <title>asktown-pf</title>
     <link rel="stylesheet" href="assets/css/main.css">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
     <script>
         window.supabaseClient = supabase.createClient('<?= $supabaseUrl ?>', '<?= $supabaseKey ?>');
     </script>
@@ -35,8 +36,6 @@ $supabaseKey = get_supabase_anon_key();
     <div id="app-root"></div>
 
     <script>
-        const userId_fixed = 'f6b1e9eb-03a4-470b-a5da-8de341f3c15a';
-
         async function signInWithGoogle() {
             const { error } = await window.supabaseClient.auth.signInWithOAuth({
                 provider: 'google',
@@ -48,6 +47,76 @@ $supabaseKey = get_supabase_anon_key();
         async function logout() {
             await window.supabaseClient.auth.signOut();
             window.location.reload();
+        }
+
+        async function startTrueLayerConnect() {
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) return;
+            
+            // Redirect to the TrueLayer connection starter
+            // This script handles the signed state for Pete's Identity Lockdown
+            window.location.href = 'start_truelayer_connection.php?t=' + encodeURIComponent(session.access_token);
+        }
+
+        async function startPlaidConnect() {
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) return;
+
+            // 1. Fetch a real link_token from our new backend
+            const resToken = await fetch('create_plaid_link_token.php', {
+                headers: { 'Authorization': 'Bearer ' + session.access_token }
+            });
+            const tokenData = await resToken.json();
+            if (!tokenData.link_token) {
+                alert('Could not initialize Plaid: ' + (tokenData.error || 'Unknown error'));
+                return;
+            }
+
+            const handler = Plaid.create({
+                token: tokenData.link_token,
+                onSuccess: async (public_token, metadata) => {
+                    try {
+                        const res = await fetch('plaid_exchange.php', {
+                            method: 'POST',
+                            headers: { 
+                                'Authorization': 'Bearer ' + session.access_token,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ public_token: public_token })
+                        });
+                        if (res.ok) location.reload();
+                    } catch (err) {
+                        alert('Plaid sync failed: ' + err.message);
+                    }
+                },
+                onExit: (err, metadata) => {
+                    if (err != null) console.error('Plaid Exit:', err);
+                },
+            });
+
+            handler.open();
+        }
+
+        async function disconnectBank() {
+            if (!confirm('Are you sure you want to disconnect your bank? This will remove your encrypted vault tokens.')) return;
+            
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) return;
+
+            try {
+                const res = await fetch('disconnect_bank.php', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + session.access_token }
+                });
+                const data = await res.json();
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (err) {
+                alert('Disconnect failed: ' + err.message);
+            }
         }
 
         function switchTab(tab, accId) {
@@ -67,13 +136,16 @@ $supabaseKey = get_supabase_anon_key();
         }
 
         async function triggerPulse() {
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) return;
+
             const btn = document.getElementById('pulse-btn');
             const consoleArea = document.getElementById('pulse-console');
             btn.disabled = true;
             consoleArea.style.display = "block";
             consoleArea.innerText = "> Initializing sync...\n";
             try {
-                const response = await fetch('scripts/gather_trigger.php?user_id=' + userId_fixed);
+                const response = await fetch('scripts/gather_trigger.php?user_id=' + session.user.id);
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 while (true) {
@@ -123,27 +195,57 @@ $supabaseKey = get_supabase_anon_key();
 
             if (!session) {
                 root.innerHTML = '<div class="nav"><div style="display:flex; align-items:center; gap:12px;"><div style="background:white; color:#1e3a5f; width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; font-weight:900; font-size:1.2rem;">A</div><div style="font-weight:700; font-size:1.4rem;">asktown-pf</div></div><button onclick="signInWithGoogle()" style="background:transparent; color:white; border:1px solid white; padding:5px 15px; border-radius:6px; cursor:pointer;">Login</button></div>' +
-                                 '<div class="container hero"><h1 class="splash-h1">Take Control of Your Finances</h1><p style="font-size:1.25rem; color:#64748b; max-width:600px; margin:0 auto 40px; line-height: 1.6;">Securely connect your UK accounts, track spending, and protect your data in your personal, encrypted vault.</p><button onclick="signInWithGoogle()" class="btn-primary" style="font-size: 1.1rem; padding: 16px 40px;">Get Started — Free</button></div>';
+                                 '<div class="container hero\"><h1 class="splash-h1">Take Control of Your Finances</h1><p style="font-size:1.25rem; color:#64748b; max-width:600px; margin:0 auto 40px; line-height: 1.6;">Securely connect your UK accounts, track spending, and protect your data in your personal, encrypted vault.</p><button onclick="signInWithGoogle()" class="btn-primary" style="font-size: 1.1rem; padding: 16px 40px;">Get Started — Free</button></div>';
             } else {
-                root.innerHTML = '<div class="nav"><div style="display:flex; align-items:center; gap:12px;"><div style="background:white; color:#1e3a5f; width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; font-weight:900; font-size:1.2rem;">A</div><div style="font-weight:700; font-size:1.4rem;">asktown-pf</div></div><div style="display:flex; align-items:center; gap:20px;"><span style="font-size:0.9rem;">Welcome, <strong>Pete Town</strong></span><button onclick="logout()" style="background:rgba(255,255,255,0.2); color:white; border:1px solid white; padding:5px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem; font-weight:600;">Logout</button></div></div>' +
-                                 '<div class="container" id="dash-wrapper"><div style="text-align:center; padding:100px 0; color:#64748b;">Decrypting your vault...</div></div>';
+                const sessionUser = session.user;
+                const userName = sessionUser.user_metadata?.full_name || 'Pete Town';
+                
+                root.innerHTML = '<div class="nav"><div style="display:flex; align-items:center; gap:12px;"><div style="background:white; color:#1e3a5f; width:32px; height:32px; display:flex; align-items:center; justify-content:center; border-radius:6px; font-weight:900; font-size:1.2rem;">A</div><div style="font-weight:700; font-size:1.4rem;">asktown-pf</div></div><div style="display:flex; align-items:center; gap:20px;"><span style="font-size:0.9rem;">Welcome, <strong>' + userName + '</strong></span><button onclick="logout()" style="background:rgba(255,255,255,0.2); color:white; border:1px solid white; padding:5px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem; font-weight:600;">Logout</button></div></div>' +
+                                 '<div class="container" id="dash-wrapper"><div style="text-align:center; padding:100px 0; color:#64748b;">Loading your vault...</div></div>';
 
                 try {
-                    const res = await fetch('get_user_accounts.php?user_id=' + userId_fixed + '&debug=1', { headers: { 'Authorization': 'Bearer ' + session.access_token } });
+                    const res = await fetch('get_user_accounts.php?user_id=' + sessionUser.id + '&debug=1', { 
+                        headers: { 'Authorization': 'Bearer ' + session.access_token } 
+                    });
+
+                    if (res.status === 404) {
+                        // Onboarding State
+                        document.getElementById('dash-wrapper').innerHTML = 
+                            '<div class="section card" style="text-align:center; padding: 60px 20px;">' +
+                            '<h2 class="section-h2">Welcome to AskTown Finance</h2>' +
+                            '<p style="color:#64748b; margin-bottom:30px;">Your encrypted vault is empty. Connect your first UK bank account to start tracking your net position securely.</p>' +
+                            '<div style="display:flex; justify-content:center; gap:15px;">' +
+                            '<button onclick="startTrueLayerConnect()" class="btn-primary">Connect UK Bank</button>' +
+                            '<button onclick="startPlaidConnect()" class="btn-primary" style="background:#00acec;">Connect Pension/Investment</button></div>' +
+                            '</div>';
+                        return;
+                    }
+
                     const data = await res.json();
                     const accounts = data.accounts || data.data || [];
                     const txs = data.vault_transactions || [];
-                    
-                    const liabilities = 2777.09;
-                    const assets = 1918.64 + 1024.50; // Including Revolut capture
+
+                    // Dynamic Calculation for Issue #20
+                    let assets = 0;
+                    let liabilities = 0;
+
+                    accounts.forEach(acc => {
+                        const bal = parseFloat(acc.balance?.current || 0);
+                        if (acc.provider?.provider_id === 'ob-amex' || acc.account_type === 'CREDIT_CARD') {
+                            liabilities += Math.abs(bal);
+                        } else {
+                            assets += bal;
+                        }
+                    });
                     const net = assets - liabilities;
 
-                    let dashboardHtml = '<div class="section card"><h2 class="section-h2">Financial Insights</h2><div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px;">' +
+                    let dashboardHtml = '<div class="section card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;"><h2 class="section-h2" style="margin:0;">Financial Insights</h2>' +
+                        '<div style="display:flex; gap:10px;"><button onclick="startPlaidConnect()" style="background:#00acec; color:white; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:0.75rem; font-weight:700;">+ Connect Pension</button><button onclick="disconnectBank()" style="background:#fee2e2; color:#b91c1c; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:0.75rem; font-weight:700;">Disconnect</button></div></div><div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px;">' +
                         '<div class="insight-box" style="background: #fff1f2; border-color: #e11d48;"><div style="color: #9f1239; font-size: 0.7rem; font-weight: bold; text-transform: uppercase;">Total Liabilities</div><div class="amount-big" style="color: #e11d48;">£' + liabilities.toLocaleString(undefined, {minimumFractionDigits: 2}) + '</div></div>' +
                         '<div class="insight-box" style="background: #f0fdf4; border-color: #166534;"><div style="color: #166534; font-size: 0.7rem; font-weight: bold; text-transform: uppercase;">Total Assets</div><div class="amount-big" style="color: #166534;">£' + assets.toLocaleString(undefined, {minimumFractionDigits: 2}) + '</div></div>' +
                         '<div class="insight-box" style="background: #f8fafc; border-color: #1e3a5f; grid-column: 1 / -1;"><div style="color: #1e3a5f; font-size: 0.7rem; font-weight: bold; text-transform: uppercase;">Net Position</div><div class="amount-big" style="color: #1e3a5f;">£' + net.toLocaleString(undefined, {minimumFractionDigits: 2}) + '</div></div>' +
                         '</div></div>' +
-                        '<div class="section card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;"><h2 class="section-h2" style="margin:0;">Bank Connections</h2><div style="display:flex; gap:10px;"><button id="pulse-btn" onclick="triggerPulse()" style="background:#3b82f6; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600;">Manual Refresh</button></div></div><pre id="pulse-console"></pre><div id="accounts-list">' +
+                        '<div class="section card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;"><h2 class="section-h2" style="margin:0;">Bank Connections</h2><div style="display:flex; gap:10px;\"><button id="pulse-btn" onclick="triggerPulse()" style="background:#3b82f6; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600;">Manual Refresh</button></div></div><pre id="pulse-console"></pre><div id="accounts-list\">' +
                         accounts.map(a => renderAccount(a, txs)).join('') +
                         '</div></div>';
 

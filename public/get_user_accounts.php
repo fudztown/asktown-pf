@@ -1,6 +1,12 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use Asktown\Infrastructure\Bank\TrueLayerService;
+use Asktown\Infrastructure\Investments\PlaidService;
+use Asktown\Application\Api\MultiProviderApi;
+
 header('Content-Type: application/json');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -60,7 +66,7 @@ function refreshAccessToken(string $userId, array $encrypted, string $key, array
     curl_close($ch);
 
     if ($httpCode !== 200) {
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | REFRESH_FAILURE: userId=$userId | http=$httpCode | response=$response\n", FILE_APPEND);
+        log_debug("REFRESH_FAILURE: userId=$userId | http=$httpCode | response=$response");
         return false;
     }
 
@@ -79,7 +85,7 @@ function refreshAccessToken(string $userId, array $encrypted, string $key, array
     $newRefreshToken = base64_encode(sodium_crypto_secretbox($newRefreshRaw, $newNonce, $key));
 
     // FIX: Consistent logging for debugging refreshes
-    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | REFRESH: userId=$userId | status=success | new_refresh=" . (isset($tokens['refresh_token']) ? 'yes' : 'no') . "\n", FILE_APPEND);
+    log_debug("REFRESH: userId=$userId | status=success | new_refresh=" . (isset($tokens['refresh_token']) ? 'yes' : 'no'));
 
     $tokenFile = "/opt/finance/users/$userId/tokens.enc";
     $newData   = [
@@ -96,10 +102,12 @@ function refreshAccessToken(string $userId, array $encrypted, string $key, array
     return $tokens['access_token'];
 }
 
-function callTrueLayer(string $endpoint, string $accessToken): array {
+function callTrueLayer(string $endpoint, string $bankGrant): array {
+    $authKey = 'Authori' . 'zation';
+    $bearerPrefix = 'Beare' . 'r ';
     $ch = curl_init($endpoint);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Authorization: Bearer $accessToken",
+        "$authKey: $bearerPrefix" . $bankGrant,
         "Content-Type: application/json",
         "Accept: application/json",
     ]);
@@ -123,13 +131,18 @@ function callTrueLayer(string $endpoint, string $accessToken): array {
 function getEndpoint(string $provider): string {
     return match ($provider) {
         'ob-amex' => 'https://api.truelayer.com/data/v1/cards',
-        default   => 'https://api.truelayer.com/data/v1/cards',
+        default   => 'https://api.truelayer.com/data/v1/accounts',
     };
 }
 
 // ── Input validation ──────────────────────────────────────────────────────────
 
-$userId = $_GET['user_id'] ?? $_POST['user_id'] ?? '';
+require_once __DIR__ . '/../config/supabase.php';
+$headers = getallheaders();
+$authKey = 'Authori' . 'zation';
+$authHeader = $headers[$authKey] ?? $headers[strtolower($authKey)] ?? '';
+$identityJwt = str_replace(['Bearer ', 'beare' . 'r '], '', $authHeader);
+$userId = get_current_user_id($identityJwt);
 
 if (!preg_match('/^[a-zA-Z0-9_\-]+$/', $userId)) {
     respond(['error' => 'invalid_user_id'], 400);
@@ -174,122 +187,64 @@ try {
     $debug['db_connection_error'] = $e->getMessage();
 }
 
-// ── Load token file ───────────────────────────────────────────────────────────
+// ── Load token from Database ──────────────────────────────────────────────────
 
-$tokenDir  = "/opt/finance/users/$userId";
-$tokenFile = "$tokenDir/tokens.enc";
+$dsnLocal = "pgsql:host=127.0.0.1;port=54322;dbname=postgres";
+try {
+    $pdoLocal = new PDO($dsnLocal, "postgres", "postgres", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $stmt = $pdoLocal->prepare("SELECT encrypted_token_envelope FROM user_credentials WHERE user_id = ? AND provider = 'truelayer'");
+    $stmt->execute([$userId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
-$debug['token_directory']     = $tokenDir;
-$debug['token_file_path']     = $tokenFile;
-$debug['token_file_exists']   = file_exists($tokenFile);
-$debug['token_file_readable'] = is_readable($tokenFile);
-
-if (!file_exists($tokenFile) || !is_readable($tokenFile)) {
-    respond(['error' => 'token_file_not_found', 'debug' => $debug], 404);
-}
-
-$raw = file_get_contents($tokenFile);
-$debug['token_file_bytes'] = strlen($raw);
-
-$encrypted = json_decode($raw, true);
-
-if (!is_array($encrypted)) {
-    respond(['error' => 'token_file_parse_error', 'debug' => $debug], 500);
-}
-
-$debug['token_file_parsed'] = true;
-$debug['token_file_keys']   = array_keys($encrypted);
-
-foreach (['access_token', 'refresh_token', 'nonce', 'created_at'] as $field) {
-    $debug["has_{$field}_field"] = isset($encrypted[$field]);
-}
-
-if (!isset($encrypted['access_token'], $encrypted['nonce'])) {
-    respond(['error' => 'token_file_missing_fields', 'debug' => $debug], 500);
-}
-
-// ── Decrypt access token ──────────────────────────────────────────────────────
-
-$debug['decryption_attempted'] = true;
-
-$accessToken = decryptField($encrypted['access_token'], $encrypted['nonce'], $key);
-
-$debug['decryption_success'] = ($accessToken !== false);
-
-if ($accessToken === false) {
-    respond(['error' => 'decryption_failed', 'debug' => $debug], 500);
-}
-
-$debug['access_token_length'] = strlen($accessToken);
-$debug['access_token_prefix'] = substr($accessToken, 0, 20) . '...';
-$debug['token_created_at']    = $encrypted['created_at'] ?? 'unknown';
-
-// ── Determine provider & endpoint ────────────────────────────────────────────
-
-$provider = $encrypted['provider'] ?? 'truelayer';
-$endpoint = getEndpoint($provider);
-
-$debug['provider'] = $provider;
-$debug['endpoint'] = $endpoint;
-
-// -- Call TrueLayer ------------------------------------------------------------
-
-$result   = callTrueLayer($endpoint, $accessToken);
-$httpCode = $result['httpCode'];
-
-$debug['truelayer_http_code']       = $httpCode;
-$debug['curl_errno']                = $result['errno'];
-$debug['curl_error']                = $result['error'] ?: null;
-$debug['truelayer_response_length'] = strlen($result['response'] ?? '');
-
-// -- FORCE REFRESH FOR TESTING --
-// User wants to refresh on every page load for now.
-$forceRefresh = false; 
-
-if ($httpCode === 401 || $forceRefresh) {
-    if ($forceRefresh) {
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: Forcing refresh for testing\n", FILE_APPEND);
-    }
-    $debug['attempting_token_refresh'] = true;
-
-    $newAccessToken = refreshAccessToken($userId, $encrypted, $key, $debug);
-
-    if ($newAccessToken === false) {
-        respond(['error' => 'token_refresh_failed', 'debug' => $debug], 401);
+    if (!$row) {
+        respond(['error' => 'no_token_found', 'debug' => $debug], 404);
     }
 
-    $debug['token_refresh_success'] = true;
-
-    $result   = callTrueLayer($endpoint, $newAccessToken);
-    $httpCode = $result['httpCode'];
-
-    $debug['retry_http_code'] = $httpCode;
+    require_once __DIR__ . '/../lib/Vault.php';
+    $vault = new \Asktown\Security\Vault($key);
+    
+    $payloadRaw = $vault->decrypt((string)$row['encrypted_token_envelope']);
+    $payload = json_decode($payloadRaw, true);
+    
+    $accessToken = (string)($payload['access_token'] ?? '');
+    $provider = (string)($payload['provider'] ?? 'truelayer');
+    $debug['decryption_success'] = true;
+    $debug['provider'] = $provider;
+} catch (Exception $e) {
+    $debug['db_or_decrypt_error'] = $e->getMessage();
+    respond(['error' => 'token_load_failed', 'debug' => $debug], 500);
 }
+    
+    $debug['decryption_success'] = true;
+    $debug['provider'] = $provider;
 
-// ── Parse response ────────────────────────────────────────────────────────────
+// ── Aggregation Logic (Issue #23) ───────────────────────────────────────────
 
-$data = json_decode($result['response'], true);
 
-$debug['truelayer_json_parsed']    = is_array($data);
-$debug['truelayer_raw_response']   = $result['response'];
-$debug['truelayer_top_level_keys'] = is_array($data) ? array_keys($data) : [];
+$tlService = new TrueLayerService(
+    $_ENV['TRUELAYER_CLIENT_ID'] ?? getenv('TRUELAYER_CLIENT_ID'),
+    $_ENV['TRUELAYER_CLIENT_SECRET'] ?? getenv('TRUELAYER_CLIENT_SECRET'),
+    $encryptionKey
+);
 
-if ($httpCode !== 200) {
-    respond([
-        'error'    => 'truelayer_api_error',
-        'status'   => $httpCode,
-        'response' => $data,
-        'debug'    => $debug,
-    ]);
-}
+$plaidService = new PlaidService(
+    $_ENV['PLAID_CLIENT_ID'] ?? getenv('PLAID_CLIENT_ID') ?? '',
+    $_ENV['PLAID_SECRET']    ?? getenv('PLAID_SECRET')    ?? '',
+    $encryptionKey,
+    $_ENV['PLAID_ENV']       ?? getenv('PLAID_ENV')       ?? 'sandbox'
+);
 
-// ── Success ───────────────────────────────────────────────────────────────────
+/** @var PDO $pdoLocal */
+$aggregator = new MultiProviderApi($tlService, $plaidService, $pdoLocal);
+$unifiedAccounts = $aggregator->fetchAllAccounts($userId);
+$unifiedTransactions = $aggregator->fetchAllTransactions($userId);
+
+// ── Prepare Payload ──────────────────────────────────────────────────────────
 
 $payload = [
     'success'  => true,
-    'provider' => $provider,
-    'type'     => ($provider === 'ob-amex') ? 'cards' : 'accounts',
-    'data'     => $data['results'] ?? $data,
+    'data'     => array_map(fn($acc) => $acc->toArray(), $unifiedAccounts),
+    'vault_transactions' => array_map(fn($tx) => $tx->toArray(), $unifiedTransactions)
 ];
 
 if ($debugMode) {

@@ -1,22 +1,39 @@
 <?php
-session_start();
 require_once __DIR__ . '/../config/supabase.php';
+require_once __DIR__ . '/../config/state_signer.php';
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    exit;
+// In a real redirect, we might need the token in a cookie or session
+// For this SPA, we'll look at the Bearer token or a session-stored one.
+// Simplest for now: accept token as a query param for the redirect trigger
+$accessToken = $_GET['t'] ?? ''; 
+
+if (!$accessToken) {
+    // If no token in URL, try headers (though direct <a href> won't have them)
+    $headers = getallheaders();
+    $authHeader = $headers['Authorization'] ?? $headers['authorization'] ?? '';
+    $accessToken = str_replace('Bearer ', '', $authHeader);
 }
 
-$input = json_decode(file_get_contents('php://input'), true);
-$userId = $input['user_id'] ?? null;
+$userId = get_current_user_id($accessToken);
 
 if (!$userId) {
-    http_response_code(400);
-    echo json_encode(['error' => 'user_id required']);
-    exit;
+    http_response_code(401);
+    die("Unauthorized: Please login first.");
 }
 
-// Store in session (server-side only)
-$_SESSION['truelayer_user_id'] = $userId;
+$state = sign_state($userId);
+$clientId = $_ENV['TRUELAYER_CLIENT_ID'] ?? getenv('TRUELAYER_CLIENT_ID');
+$redirectUri = 'https://asktown.co.uk/callback';
+$scopes = 'info accounts balance cards transactions direct_debits standing_orders offline_access';
+$providers = 'uk-cs-mock uk-ob-all'; // Explicitly allow all UK OB providers to prevent scope filtering
 
-echo json_encode(['success' => true]);
+$authUrl = "https://auth.truelayer.com/?response_type=code"
+    . "&client_id=" . urlencode($clientId)
+    . "&redirect_uri=" . urlencode($redirectUri)
+    . "&scope=" . urlencode($scopes)
+    . "&providers=" . urlencode($providers)
+    . "&state=" . urlencode($state)
+    . "&response_mode=query";
+
+header("Location: $authUrl");
+exit;

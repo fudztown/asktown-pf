@@ -2,8 +2,8 @@
 /**
  * TrueLayer OAuth Callback Handler
  */
-@file_put_contents("/tmp/truelayer_debug.log", date('c') . " | CALLBACK HIT\n", FILE_APPEND);
-
+require_once __DIR__ . '/../config/supabase.php';
+log_debug("CALLBACK HIT");
 if (!extension_loaded('sodium')) {
     header('Location: /index.php?truelayer_error=sodium_missing');
     exit;
@@ -87,8 +87,7 @@ try {
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-
-    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | TOKEN_EXCHANGE | HTTP=$httpCode | Response=" . substr($response ?: 'EMPTY', 0, 300) . "\n", FILE_APPEND);
+    log_debug("TOKEN_EXCHANGE | HTTP=$httpCode | Response=" . substr($response ?: 'EMPTY', 0, 300));
 
     if ($httpCode !== 200 || !$response) {
         header('Location: /index.php?truelayer_error=token_exchange_failed');
@@ -101,56 +100,46 @@ try {
         exit;
     }
 
-    // === DETAILED DEBUG LOGGING FOR TOKEN SAVE ===
-    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userId extracted = " . ($userId ?? 'NULL') . "\n", FILE_APPEND);
-    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: encryptionKey present = " . (!empty($encryptionKey) ? 'yes' : 'NO') . "\n", FILE_APPEND);
+    // Vault and Database Integration
+    require_once __DIR__ . '/../lib/Vault.php';
+    $binaryKey = \Asktown\Security\Vault::deriveKey($encryptionKey);
+    $vault = new \Asktown\Security\Vault($binaryKey);
 
-    // Encrypt and store
+    // Prepare Payload
+    $payloadJson = json_encode([
+        'access_token'  => $tokens['access_token'],
+        'refresh_token' => $tokens['refresh_token'] ?? null,
+        'provider'      => 'truelayer'
+    ]);
+
+    // Encrypt using standardized Vault envelope: base64(nonce . ciphertext)
+    $envelope = $vault->encrypt($payloadJson);
+
+    // Save to Database (user_tokens table)
+    $dbPass = $_ENV['DB_PASSWORD'] ?? getenv('DB_PASSWORD');
+    $dsn = "pgsql:host=127.0.0.1;port=54322;dbname=postgres";
     try {
-        $key   = sodium_crypto_generichash($encryptionKey, '', 32);
-        $nonce = random_bytes(24);
-
-        $encrypted = [
-            'access_token'  => base64_encode(sodium_crypto_secretbox($tokens['access_token'], $nonce, $key)),
-            'refresh_token' => base64_encode(sodium_crypto_secretbox($tokens['refresh_token'] ?? '', $nonce, $key)),
-            'nonce'         => base64_encode($nonce),
-            'created_at'    => date('c'),
-            'provider'      => 'truelayer',
-        ];
-
-        $userDir = "/opt/finance/users/$userId";
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userDir = $userDir\n", FILE_APPEND);
-
-        if (!is_dir($userDir)) {
-            $mkdirResult = @mkdir($userDir, 0700, true);
-            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: mkdir result = " . ($mkdirResult ? 'success' : 'failed') . "\n", FILE_APPEND);
-        } else {
-            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: userDir already existed\n", FILE_APPEND);
-        }
-
-        $tokenFile = "$userDir/tokens.enc";
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: tokenFile path = $tokenFile\n", FILE_APPEND);
-
-        $writeResult = @file_put_contents($tokenFile, json_encode($encrypted));
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: file_put_contents bytes written = " . ($writeResult !== false ? $writeResult : 'FAILED') . "\n", FILE_APPEND);
-
-        if ($writeResult !== false) {
-            @chmod($tokenFile, 0600);
-            @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG: chmod applied\n", FILE_APPEND);
-        }
-
+        $pdo = new PDO($dsn, "postgres", "postgres", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $stmt = $pdo->prepare("
+            INSERT INTO user_credentials (user_id, provider, encrypted_token_envelope, last_rotation)
+            VALUES (?, 'truelayer', ?, NOW())
+            ON CONFLICT (user_id, provider) DO UPDATE SET 
+                encrypted_token_envelope = EXCLUDED.encrypted_token_envelope,
+                last_rotation = NOW()
+        ");
+        $stmt->execute([$userId, $envelope]);
     } catch (Throwable $e) {
-        @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | DEBUG EXCEPTION during save: " . $e->getMessage() . "\n", FILE_APPEND);
+        log_debug("DATABASE ERROR during save: " . $e->getMessage());
         header('Location: /index.php?truelayer_error=token_save_failed');
         exit;
     }
-    // === END DEBUG LOGGING ===
 
+    header('Location: /index.php?bank_connected=1');
     header('Location: /index.php?bank_connected=1');
     exit;
 
 } catch (Throwable $e) {
-    @file_put_contents("/tmp/truelayer_debug.log", date('c') . " | EXCEPTION: " . $e->getMessage() . "\n", FILE_APPEND);
+    log_debug("EXCEPTION: " . $e->getMessage());
     header('Location: /index.php?truelayer_error=internal_error');
     exit;
 }
